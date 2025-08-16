@@ -344,6 +344,11 @@ const SKILL_METADATA: Record<string, { description: string; params: Record<strin
             }
         },
         required: ["message"]
+    },
+    captureScreenshot: {
+        description: "Capture a 3D screenshot of what the bot currently sees. Returns a visual representation of the bot's current perspective.",
+        params: {},
+        required: []
     }
 };
 
@@ -461,8 +466,42 @@ function createSkillExecutor(skillName: string) {
 
             // Format the response
             let response = '';
+            let imageData = null;
 
-            // If we have observations, format them nicely
+            // Check if we have image data in the observations (for screenshot skill)
+            if (observations.length > 0) {
+                const lastObservation = observations[observations.length - 1];
+                // Check if this looks like base64 image data from captureScreenshot
+                if (lastObservation.includes('data:image/jpeg;base64,')) {
+                    // Extract the base64 data
+                    const base64Match = lastObservation.match(/data:image\/jpeg;base64,([A-Za-z0-9+/=]+)/);
+                    if (base64Match) {
+                        imageData = {
+                            type: "image",
+                            data: base64Match[1],
+                            mimeType: "image/jpeg"
+                        };
+                        // Remove the image data from the text response
+                        observations[observations.length - 1] = lastObservation.replace(/!\[.*?\]\(data:image\/jpeg;base64,[A-Za-z0-9+/=]+\)/, '[Screenshot captured]');
+                    }
+                }
+            }
+
+            // If we have image data, return it in proper MCP format
+            if (imageData) {
+                console.error(`[MCP] Skill '${skillName}' returning image response`);
+                return {
+                    content: [
+                        imageData,
+                        {
+                            type: "text",
+                            text: observations.join('\n').trim()
+                        }
+                    ]
+                };
+            }
+
+            // Otherwise format text response as before
             if (observations.length > 0 || textObservations.length > 0) {
                 // Add start observation if any
                 if (startObservationSet && observations.length > 0) {

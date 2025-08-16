@@ -90,7 +90,8 @@ function isFullyGrownCrop(block: Block): boolean {
 
 // Get nearby blocks within radius
 function getNearbyBlocks(bot: Bot, radius: number = 16): string[] {
-    const blockTypes: Set<string> = new Set();
+    const blocks: string[] = [];
+    const processedDoubleChests = new Set<string>(); // Track double chests we've already counted
     if (!bot.entity) return [];
 
     const position = bot.entity.position.floored();
@@ -103,13 +104,51 @@ function getNearbyBlocks(bot: Bot, radius: number = 16): string[] {
                 const blockPos = position.offset(x, y, z);
                 const block = bot.blockAt(blockPos);
                 if (block && block.type !== 0 && canSeeBlock(bot, block.position)) {
-                    blockTypes.add(parseBlockInfo(bot, block));
+                    const blockName = parseBlockInfo(bot, block);
+                    
+                    // Special handling for chests and trapped chests
+                    if (blockName === 'chest' || blockName === 'trapped_chest') {
+                        const posKey = `${blockPos.x},${blockPos.y},${blockPos.z}`;
+                        
+                        // Check if this chest is part of a double chest we've already processed
+                        if (processedDoubleChests.has(posKey)) {
+                            continue; // Skip this chest, already counted as part of double chest
+                        }
+                        
+                        // Check for adjacent chest to form double chest
+                        const adjacentPositions = [
+                            blockPos.offset(1, 0, 0),  // East
+                            blockPos.offset(-1, 0, 0), // West
+                            blockPos.offset(0, 0, 1),  // South
+                            blockPos.offset(0, 0, -1)  // North
+                        ];
+                        
+                        let isDoubleChest = false;
+                        for (const adjPos of adjacentPositions) {
+                            const adjBlock = bot.blockAt(adjPos);
+                            if (adjBlock && adjBlock.name === block.name) {
+                                // Found adjacent chest of same type - this is a double chest
+                                isDoubleChest = true;
+                                // Mark both positions as processed
+                                processedDoubleChests.add(posKey);
+                                processedDoubleChests.add(`${adjPos.x},${adjPos.y},${adjPos.z}`);
+                                blocks.push(`double_${blockName}`);
+                                break;
+                            }
+                        }
+                        
+                        if (!isDoubleChest) {
+                            blocks.push(blockName);
+                        }
+                    } else {
+                        blocks.push(blockName);
+                    }
                 }
             }
         }
     }
 
-    return Array.from(blockTypes);
+    return blocks;
 }
 
 // Get nearby entities
@@ -253,27 +292,169 @@ export const lookAround = async (
             observations.push(`You are not holding anything.`);
         }
 
-        // Nearby blocks
+        // Nearby blocks with importance weighting
         const nearbyBlocks = getNearbyBlocks(bot, 16);
         if (nearbyBlocks.length > 0) {
             observations.push(`\nYou see these blocks around you:`);
-            // Group similar blocks
-            const blockCounts: Record<string, number> = {};
+            
+            // Define importance weights using regex patterns for better matching
+            const blockImportancePatterns: Array<[RegExp, number]> = [
+                // Critical/Valuable (10)
+                [/diamond/, 10],
+                [/emerald/, 10], 
+                [/ancient_debris/, 10],
+                [/netherite/, 10],
+                [/beacon/, 10],
+                
+                // Important resources (8-9)
+                [/enchant/, 9],
+                [/anvil/, 8],
+                [/spawner/, 8],
+                [/shulker/, 9],
+                [/(iron|gold|copper)_ore/, 8],
+                [/deepslate.*ore/, 8],
+                
+                // Dangerous (8-9)
+                [/lava/, 9],
+                [/fire/, 9],
+                [/tnt/, 8],
+                [/wither/, 7],
+                [/magma/, 6],
+                
+                // Useful interactables (7-8)
+                [/double_chest/, 9],  // Double chests are more valuable
+                [/double_trapped_chest/, 9],
+                [/chest/, 8],
+                [/barrel/, 7],
+                [/hopper/, 7],
+                [/dropper/, 6],
+                [/dispenser/, 6],
+                [/crafting/, 7],
+                [/furnace/, 7],
+                [/blast_furnace/, 7],
+                [/smoker/, 7],
+                [/brewing/, 7],
+                [/cauldron/, 6],
+                [/composter/, 5],
+                
+                // Ores (6-7)
+                [/coal_ore/, 7],
+                [/lapis/, 7],
+                [/redstone_ore/, 7],
+                [/quartz/, 6],
+                
+                // Food/Farming (6-7)
+                [/fully grown/, 7],
+                [/mature/, 7],
+                [/farmland/, 5],
+                [/hay_block/, 5],
+                
+                // Navigation/Utility (5-7)
+                [/portal/, 8],
+                [/bed/, 7],
+                [/respawn/, 8],
+                [/ladder/, 6],
+                [/scaffolding/, 6],
+                [/door/, 5],
+                [/gate/, 5],
+                [/torch/, 4],
+                [/lantern/, 4],
+                
+                // Wood types (3)
+                [/(oak|birch|spruce|jungle|acacia|dark_oak|mangrove|cherry|bamboo)_(log|wood|planks)/, 3],
+                [/stripped/, 3],
+                
+                // Stone variants (2)
+                [/(stone|andesite|diorite|granite|deepslate|blackstone|basalt)$/, 2],
+                [/cobblestone/, 2],
+                [/brick/, 3],
+                [/smooth/, 2],
+                [/polished/, 2],
+                
+                // Glass/Decorative (2)
+                [/glass/, 2],
+                [/wool/, 2],
+                [/carpet/, 2],
+                [/concrete/, 2],
+                
+                // Common terrain (1)
+                [/dirt/, 1],
+                [/grass_block/, 1],
+                [/sand/, 2],
+                [/gravel/, 2],
+                [/clay/, 3],
+                
+                // Vegetation (1)
+                [/leaves/, 1],
+                [/flower/, 2],
+                [/grass$/, 1],
+                [/fern/, 1],
+                
+                // Liquids (3)
+                [/water/, 3],
+                
+                // Ignore
+                [/air/, 0]
+            ];
+            
+            // Calculate importance scores
+            const blockScores: Record<string, { count: number, importance: number, score: number }> = {};
             nearbyBlocks.forEach(block => {
-                blockCounts[block] = (blockCounts[block] || 0) + 1;
+                if (!blockScores[block]) {
+                    // Find importance using regex patterns
+                    let importance = 3; // Default importance for unmatched blocks
+                    for (const [pattern, weight] of blockImportancePatterns) {
+                        if (pattern.test(block.toLowerCase())) {
+                            importance = Math.max(importance, weight);
+                        }
+                    }
+                    
+                    blockScores[block] = {
+                        count: 0,
+                        importance: importance,
+                        score: 0
+                    };
+                }
+                blockScores[block].count++;
             });
-
-            // Sort by count (most common first)
-            const sortedBlocks = Object.entries(blockCounts)
-                .sort((a, b) => b[1] - a[1])
-                .slice(0, 15); // Limit to top 15 for readability
-
-            sortedBlocks.forEach(([block, count]) => {
-                observations.push(`- ${count} ${block}`);
+            
+            // Calculate final scores (importance * sqrt(count) to balance rarity vs quantity)
+            Object.values(blockScores).forEach(block => {
+                block.score = block.importance * Math.sqrt(block.count);
             });
-
-            if (nearbyBlocks.length > 15) {
-                observations.push(`... and ${nearbyBlocks.length - 15} other block types`);
+            
+            // Sort by score (highest first)
+            const sortedBlocks = Object.entries(blockScores)
+                .sort((a, b) => b[1].score - a[1].score)
+                .filter(([_, data]) => data.importance > 0); // Filter out air
+            
+            // Group by importance level for better readability
+            const importantBlocks = sortedBlocks.filter(([_, d]) => d.importance >= 7);
+            const usefulBlocks = sortedBlocks.filter(([_, d]) => d.importance >= 4 && d.importance < 7);
+            const commonBlocks = sortedBlocks.filter(([_, d]) => d.importance < 4 && d.importance > 0);
+            
+            // Report important blocks first
+            if (importantBlocks.length > 0) {
+                observations.push(`Important blocks nearby:`);
+                importantBlocks.slice(0, 10).forEach(([block, data]) => {
+                    observations.push(`- ${data.count} ${block}`);
+                });
+            }
+            
+            // Then useful blocks
+            if (usefulBlocks.length > 0) {
+                observations.push(`Useful blocks:`);
+                usefulBlocks.slice(0, 8).forEach(([block, data]) => {
+                    observations.push(`- ${data.count} ${block}`);
+                });
+            }
+            
+            // Finally common blocks (summarized)
+            if (commonBlocks.length > 0) {
+                const topCommon = commonBlocks.slice(0, 5);
+                if (topCommon.length > 0) {
+                    observations.push(`Common blocks: ${topCommon.map(([b, d]) => `${b} (${d.count})`).join(', ')}`);
+                }
             }
         }
 

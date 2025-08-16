@@ -49,6 +49,9 @@ import { initializeChatHistory } from './skills/verified/readChat.js';
 program
     .option('-p, --port <port>', 'Default Minecraft server port')
     .option('-h, --host <host>', 'Default Minecraft server host')
+    .option('-u, --username <username>', 'Bot username or email for Microsoft auth')
+    .option('-a, --auth <auth>', 'Authentication mode (offline/microsoft)')
+    .option('--password <password>', 'Password for Microsoft authentication')
     .parse(process.argv);
 
 const options = program.opts();
@@ -85,24 +88,11 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
     const tools = [
         {
             name: "joinGame",
-            description: "Spawn a bot into the Minecraft game",
+            description: "Connect the bot to the Minecraft server using configured credentials",
             inputSchema: {
                 type: "object",
-                properties: {
-                    username: {
-                        type: "string",
-                        description: "The username for the bot"
-                    },
-                    host: {
-                        type: "string",
-                        description: "Minecraft server host (defaults to 'localhost' or command line option)"
-                    },
-                    port: {
-                        type: "number",
-                        description: "Minecraft server port (defaults to 25565 or command line option)"
-                    }
-                },
-                required: ["username"]
+                properties: {},
+                required: []
             }
         },
         {
@@ -141,28 +131,42 @@ server.setRequestHandler(CallToolRequestSchema, async (request: CallToolRequest)
     // Handle joinGame tool
     if (name === "joinGame") {
         try {
-            const { username, host, port } = args as { username: string; host?: string; port?: number };
+            // Use command line options or environment variables for all settings
+            const serverHost = options.host || process.env.MC_HOST || 'localhost';
+            const serverPort = options.port ? parseInt(options.port) : (process.env.MC_PORT ? parseInt(process.env.MC_PORT) : 25565);
+            const username = options.username || process.env.MC_USERNAME || 'MCPBot';
+            const authMode = options.auth || process.env.MC_AUTH || 'offline';
+            const password = options.password || process.env.MC_PASSWORD;
 
-            // Use provided values, fall back to command line options, then defaults
-            const serverHost = host || options.host || 'localhost';
-            const serverPort = port || (options.port ? parseInt(options.port) : 25565);
+            console.error(`[MCP] Attempting to spawn bot '${username}' on ${serverHost}:${serverPort} with ${authMode} auth`);
 
-            console.error(`[MCP] Attempting to spawn bot '${username}' on ${serverHost}:${serverPort}`);
-
-            // Create a new bot
-            const bot = mineflayerCreateBot({
+            // Create bot options
+            const botOptions: any = {
                 host: serverHost,
                 port: serverPort,
-                username: username
-                // Auto-detect version by not specifying it
-            }) as any; // Type assertion to allow adding custom properties
+                username: username,
+                version: '1.21.4'  // Force 1.21.4 for better compatibility with viewer
+            };
+
+            // Add authentication options if specified
+            if (authMode !== 'offline') {
+                botOptions.auth = authMode;
+                if (password) {
+                    botOptions.password = password;
+                }
+                console.error(`[MCP] Using ${authMode} authentication mode`);
+            }
+
+            // Create a new bot
+            const bot = mineflayerCreateBot(botOptions) as any; // Type assertion to allow adding custom properties
 
             // Dynamically import and load plugins
-            const [pathfinderModule, pvpModule, toolModule, collectBlockModule] = await Promise.all([
+            const [pathfinderModule, pvpModule, toolModule, collectBlockModule, viewerModule] = await Promise.all([
                 import('mineflayer-pathfinder'),
                 import('mineflayer-pvp'),
                 import('mineflayer-tool'),
-                import('mineflayer-collectblock')
+                import('mineflayer-collectblock'),
+                import('prismarine-viewer')
             ]);
 
             // Load plugins
@@ -218,6 +222,34 @@ server.setRequestHandler(CallToolRequestSchema, async (request: CallToolRequest)
 
                         // Initialize chat history tracking
                         initializeChatHistory(bot);
+
+                        // Start the 3D viewer with dynamic port selection
+                        let viewerPort = 3007 + botManager.getBotCount();
+                        let viewerStarted = false;
+                        
+                        // Try to find an available port
+                        for (let attempts = 0; attempts < 10; attempts++) {
+                            try {
+                                viewerModule.mineflayer(bot, { port: viewerPort, firstPerson: true });
+                                console.error(`[MCP] Web viewer started at http://localhost:${viewerPort} (first-person mode)`);
+                                bot.viewerPort = viewerPort;
+                                viewerStarted = true;
+                                break;
+                            } catch (err: any) {
+                                if (err.code === 'EADDRINUSE' || err.message?.includes('EADDRINUSE')) {
+                                    viewerPort++;
+                                    console.error(`[MCP] Port ${viewerPort - 1} in use, trying port ${viewerPort}`);
+                                } else {
+                                    console.error(`[MCP] Failed to start viewer: ${err.message}`);
+                                    break;
+                                }
+                            }
+                        }
+                        
+                        if (!viewerStarted) {
+                            console.error(`[MCP] Warning: Could not start web viewer (ports unavailable)`);
+                            bot.viewerPort = null; // Mark as unavailable
+                        }
 
                         resolve();
                     });
@@ -308,14 +340,20 @@ server.setRequestHandler(CallToolRequestSchema, async (request: CallToolRequest)
                 )
             ]);
 
-            // Ensure result is properly formatted
+            // Check if result is already in MCP format (has content array)
+            if (typeof result === 'object' && result !== null && 'content' in result && Array.isArray(result.content)) {
+                // Result is already properly formatted for MCP
+                return result;
+            }
+
+            // Otherwise format as text response
             let responseText: string;
             if (result === undefined || result === null) {
                 responseText = `Skill '${name}' executed successfully`;
             } else if (typeof result === 'string') {
                 responseText = result;
             } else if (typeof result === 'object') {
-                // If result is already an object, stringify it
+                // If result is an object but not MCP formatted, stringify it
                 responseText = JSON.stringify(result, null, 2);
             } else {
                 // For any other type, convert to string
@@ -345,17 +383,212 @@ server.setRequestHandler(CallToolRequestSchema, async (request: CallToolRequest)
     throw new McpError(ErrorCode.MethodNotFound, `Unknown tool: ${name}`);
 });
 
+// Helper to kill process using a port
+async function killPortProcess(port: number): Promise<void> {
+    try {
+        // Use lsof to find process using the port
+        const { exec } = await import('child_process');
+        const { promisify } = await import('util');
+        const execAsync = promisify(exec);
+        
+        // Find and kill process on the port
+        try {
+            const { stdout } = await execAsync(`lsof -ti:${port}`);
+            const pids = stdout.trim().split('\n').filter(Boolean);
+            for (const pid of pids) {
+                console.error(`[MCP] Killing process ${pid} using port ${port}`);
+                try {
+                    await execAsync(`kill -9 ${pid}`);
+                } catch (e) {
+                    // Process might already be dead
+                }
+            }
+        } catch (e) {
+            // No process found on port, which is fine
+        }
+    } catch (error) {
+        console.error(`[MCP] Could not clean up port ${port}:`, error);
+    }
+}
+
 // Initialize and start the server
 async function main() {
     const defaultHost = options.host || 'localhost';
     const defaultPort = options.port || '25565';
 
     console.error(`Starting MCP server for Minecraft`);
-    console.error(`Default connection: ${defaultHost}:${defaultPort} (can be overridden per bot)`);
+    console.error(`Default connection: ${defaultHost}:${defaultPort}`);
+
+    // Clean up any leftover viewer ports
+    console.error('[MCP] Cleaning up any leftover connections...');
+    for (let port = 3007; port <= 3017; port++) {
+        await killPortProcess(port);
+    }
+    
+    // Disconnect any existing bots
+    botManager.disconnectAll();
 
     // Initialize skills
     await initializeSkills();
     console.error(`Loaded ${skillRegistry.getAllSkills().length} skills`);
+
+    // Auto-join the game if credentials are provided
+    if (options.username) {
+        console.error('[MCP] Auto-joining game with provided credentials...');
+        
+        let connected = false;
+        let retryDelay = 2000; // Start with 2 seconds
+        const maxRetries = 3;
+        
+        for (let retry = 0; retry < maxRetries && !connected; retry++) {
+            if (retry > 0) {
+                console.error(`[MCP] Retry ${retry}/${maxRetries} after ${retryDelay/1000}s delay...`);
+            }
+            await new Promise(resolve => setTimeout(resolve, retryDelay));
+            
+            try {
+            const serverHost = options.host || 'localhost';
+            const serverPort = options.port ? parseInt(options.port) : 25565;
+            const username = options.username;
+            const authMode = options.auth || 'offline';
+            const password = options.password;
+
+            console.error(`[MCP] Connecting bot '${username}' to ${serverHost}:${serverPort} with ${authMode} auth`);
+
+            // Create bot options
+            const botOptions: any = {
+                host: serverHost,
+                port: serverPort,
+                username: username,
+                version: '1.21.4'  // Force 1.21.4 for better compatibility with viewer
+            };
+
+            // Add authentication options if specified
+            if (authMode !== 'offline') {
+                botOptions.auth = authMode;
+                if (password) {
+                    botOptions.password = password;
+                }
+            }
+
+            // Create a new bot
+            const bot = mineflayerCreateBot(botOptions) as any;
+
+            // Dynamically import and load plugins
+            const [pathfinderModule, pvpModule, toolModule, collectBlockModule, viewerModule] = await Promise.all([
+                import('mineflayer-pathfinder'),
+                import('mineflayer-pvp'),
+                import('mineflayer-tool'),
+                import('mineflayer-collectblock'),
+                import('prismarine-viewer')
+            ]);
+
+            // Load plugins
+            bot.loadPlugin(pathfinderModule.pathfinder);
+            bot.loadPlugin(pvpModule.plugin);
+            bot.loadPlugin(toolModule.plugin);
+            bot.loadPlugin(collectBlockModule.plugin);
+
+            // Add Movements constructor to bot
+            bot.Movements = pathfinderModule.Movements;
+
+            // Add a logger to the bot
+            bot.logger = {
+                info: (message: string) => console.error(`[${username}] ${new Date().toISOString()} : ${message}`),
+                error: (message: string) => console.error(`[${username}] ${new Date().toISOString()} : ERROR: ${message}`),
+                warn: (message: string) => console.error(`[${username}] ${new Date().toISOString()} : WARN: ${message}`),
+                debug: (message: string) => console.error(`[${username}] ${new Date().toISOString()} : DEBUG: ${message}`)
+            };
+
+            // Register the bot
+            const botId = botManager.addBot(username, bot);
+
+            // Wait for spawn
+            await new Promise<void>((resolve, reject) => {
+                const timeout = setTimeout(() => reject(new Error('Bot spawn timed out')), 30000);
+                
+                bot.once('spawn', () => {
+                    clearTimeout(timeout);
+                    console.error(`[MCP] Bot ${username} spawned successfully!`);
+
+                    // Initialize bot properties
+                    bot.exploreChunkSize = 16;
+                    bot.knownChunks = bot.knownChunks || {};
+                    bot.currentSkillCode = '';
+                    bot.currentSkillData = {};
+                    bot.nearbyBlockXZRange = 20;
+                    bot.nearbyBlockYRange = 10;
+                    bot.nearbyPlayerRadius = 10;
+                    bot.hearingRadius = 30;
+                    bot.nearbyEntityRadius = 10;
+
+                    // Initialize chat history tracking
+                    initializeChatHistory(bot);
+
+                    // Start the 3D viewer with dynamic port selection
+                    let viewerPort = 3007;
+                    let viewerStarted = false;
+                    
+                    // Try to find an available port
+                    for (let attempts = 0; attempts < 10; attempts++) {
+                        try {
+                            viewerModule.mineflayer(bot, { port: viewerPort, firstPerson: true });
+                            console.error(`[MCP] Web viewer started at http://localhost:${viewerPort}`);
+                            bot.viewerPort = viewerPort;
+                            viewerStarted = true;
+                            break;
+                        } catch (err: any) {
+                            if (err.code === 'EADDRINUSE') {
+                                viewerPort++;
+                                console.error(`[MCP] Port ${viewerPort - 1} in use, trying port ${viewerPort}`);
+                            } else {
+                                console.error(`[MCP] Failed to start viewer: ${err.message}`);
+                                break;
+                            }
+                        }
+                    }
+                    
+                    if (!viewerStarted) {
+                        console.error(`[MCP] Warning: Could not start web viewer (all ports in use)`);
+                    }
+
+                    resolve();
+                });
+                
+                bot.once('error', (err: Error) => {
+                    clearTimeout(timeout);
+                    reject(err);
+                });
+                
+                bot.once('kicked', (reason: string) => {
+                    clearTimeout(timeout);
+                    reject(new Error(`Bot kicked: ${reason}`));
+                });
+            });
+
+            console.error(`[MCP] Bot '${username}' successfully connected and ready!`);
+            connected = true;
+        } catch (error: any) {
+            console.error(`[MCP] Failed to auto-join:`, error.message);
+            
+            // Check if it's a throttling error
+            if (error.message?.includes('throttled') || error.message?.includes('Connection throttled')) {
+                retryDelay *= 2; // Exponential backoff
+                continue;
+            }
+            
+            // For other errors, don't retry
+            break;
+        }
+        }
+        
+        if (!connected) {
+            console.error(`[MCP] Could not auto-connect after ${maxRetries} attempts`);
+            console.error(`[MCP] You can still use the 'joinGame' tool to connect manually`);
+        }
+    } else {
+        console.error('[MCP] No credentials provided via CLI. Use joinGame tool to connect.');
+    }
 
     // Connect to stdio transport
     const transport = new StdioServerTransport();
@@ -374,6 +607,11 @@ process.on('SIGINT', () => {
 // Capture any uncaught exceptions and send to stderr
 process.on('uncaughtException', (error) => {
     console.error('[UNCAUGHT EXCEPTION]', error);
+    // Don't exit for EADDRINUSE errors - they're handled gracefully
+    if (error.message?.includes('EADDRINUSE')) {
+        console.error('[MCP] Port conflict handled - continuing operation');
+        return;
+    }
     process.exit(1);
 });
 
