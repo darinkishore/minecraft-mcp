@@ -1,106 +1,91 @@
-import {Bot} from 'mineflayer';
+import { Bot } from 'mineflayer';
+import { ISkillParams, ISkillServiceParams } from '../../types/skillType.js';
+import {
+  findNearbyContainers,
+  humanizeContainerType,
+  openContainerAt,
+  closeContainer,
+  summarizeContainerContents,
+  countFreeContainerSlots,
+  getContainerSlotInfo,
+  formatPosition
+} from '../library/chestUtils.js';
+import { getWorldKey, loadStore, getChestByPosition } from '../../storage/chestStore.js';
+import { Vec3 } from 'vec3';
+import { runExclusive } from '../library/mutex.js';
 
-import {ISkillServiceParams, ISkillParams} from '../../types/skillType.js';
-import {isSignalAborted, validateSkillParams} from '../index.js';
-import {asyncwrap} from '../library/asyncwrap.js';
-import {findAChest, findNearbyChests} from '../library/findAChest.js';
-import {navigateToLocation} from '../library/navigateToLocation.js';
-import {updateChestInterface} from '../library/updateChestInterface.js';
-
-/**
- * Opens the closest nearby chest that is currently unopened and presents its inventory to the agent
- * It is recommended to wait until the chest opens and decide what to place in or take out then.
- *
- * @param {Bot} bot - The Mineflayer bot instance.
- * @param {ISkillParams} params - The parameters for the skill function.
- * @param {ISkillServiceParams} serviceParams - Additional parameters for the skill function.
- *
- * @return {Promise<boolean>} - Returns true if the bot successfully opened a nearby chest, false otherwise.
- */
 export const openNearbyChest = async (
   bot: Bot,
   params: ISkillParams,
-  serviceParams: ISkillServiceParams,
+  serviceParams: ISkillServiceParams
 ): Promise<boolean> => {
-  const skillName = 'openNearbyChest';
-  const requiredParams: string[] = [];
-  const isParamsValid = validateSkillParams(
-    params,
-    requiredParams,
-    skillName,
-  );
-  if (!isParamsValid) {
-    serviceParams.cancelExecution?.();
-    bot.emit(
-      'alteraBotEndObservation',
-      `Mistake: You didn't provide all of the required parameters ${requiredParams.join(', ')} for the ${skillName} skill.`,
-    );
-    return false;
-  }
+  try {
+    await loadStore();
+    const worldKey = getWorldKey(bot);
 
-  const unpackedParams = {
-    setStatsData: serviceParams.setStatsData,
-    getStatsData: serviceParams.getStatsData,
-    signal: serviceParams.signal,
-  };
-  const {setStatsData, getStatsData, signal} = unpackedParams;
-  const NEARBY_DISTANCE = bot.nearbyBlockXZRange;
-  const chestPositions = findNearbyChests(bot, {
-    searchRadius: NEARBY_DISTANCE,
-    maxChests: 3,
-  });
+    // Look for nearby containers
+    const rx = 12, ry = 6, rz = 12; // reasonable default scan
+    const containers = await findNearbyContainers(bot, rx, ry, rz);
 
-  if (chestPositions.length === 0) {
-    return bot.emit(
-      'alteraBotEndObservation',
-      'You tried to open a nearby chest but no chests found nearby. If you were taking out items, no items were taken out.',
-    );
-  }
-
-  const chestPosition = await findAChest(bot, {posToAvoid: null});
-  if (chestPosition) {
-    const navigateToLocationFunc = async function () {
-      return navigateToLocation(bot, {
-        x: chestPosition.x,
-        y: chestPosition.y,
-        z: chestPosition.z,
-        range: 2,
-      });
-    };
-    await asyncwrap({func: navigateToLocationFunc, setStatsData, getStatsData});
-
-    // check for cancellation signal
-    if (isSignalAborted(signal)) {
-      return bot.emit(
-        'alteraBotEndObservation',
-        `You decided to do something else and stopped opening the chest.`,
-      );
+    if (!containers || containers.length === 0) {
+      bot.emit('alteraBotEndObservation', 'No containers found nearby.');
+      return false;
     }
 
-    const chestBlock = bot.blockAt(chestPosition);
-    bot.lookAt(chestPosition.offset(0.5, 0.5, 0.5));
-
-    if (!chestBlock)
-      return bot.emit(
-        'alteraBotEndObservation',
-        'The chest you were trying to open no longer exists!',
-      );
-
-    await updateChestInterface(bot, {
-      chestPosition,
-      getStatsData,
-      setStatsData,
+    // Filter out forbidden-labeled containers
+    const visible = containers.filter(c => {
+      const rec = getChestByPosition(worldKey, { x: c.position.x, y: c.position.y, z: c.position.z });
+      return !(rec && rec.forbidden);
     });
-    return bot.emit(
-      'alteraBotEndObservation',
-      `You have opened a chest at ${chestPosition}.`,
-    );
-  } else {
-    return bot.emit(
-      'alteraBotEndObservation',
-      'You tried to open a nearby chest but there are no chests nearby. If you were taking out items, no items were taken out.',
-    );
+
+    if (visible.length === 0) {
+      bot.emit('alteraBotEndObservation', 'Only forbidden containers found nearby; nothing to open.');
+      return false;
+    }
+
+    // Choose nearest
+    const me = bot.entity?.position ?? new Vec3(0, 0, 0);
+    visible.sort((a, b) => a.position.distanceTo(me) - b.position.distanceTo(me));
+    const target = visible[0];
+
+    // Open container (mutex prevents concurrent access)
+    const window = await runExclusive(bot, 'container', async () => {
+      return await openContainerAt(bot, target.position, serviceParams.signal);
+    });
+
+    try {
+      // Summarize contents
+      const contents = summarizeContainerContents(window).sort((a, b) => b.count - a.count);
+      const free = countFreeContainerSlots(window);
+      const { containerSize } = getContainerSlotInfo(window);
+
+      const rec = getChestByPosition(worldKey, { x: target.position.x, y: target.position.y, z: target.position.z });
+      const label = rec?.label;
+      const notes = rec?.notes;
+      const typeHuman = humanizeContainerType(target.type);
+      const posStr = formatPosition(target.position);
+
+      const lines: string[] = [];
+      lines.push(`=== ${label ? label : 'Nearby Container'} (${typeHuman}) ===`);
+      lines.push(`Position: ${posStr}`);
+      lines.push(`Free slots: ${free}/${containerSize}`);
+      if (notes) lines.push(`Notes: ${notes}`);
+      lines.push('Contents:');
+      if (contents.length === 0) {
+        lines.push('- (empty)');
+      } else {
+        for (const it of contents) {
+          lines.push(`- ${it.name} x${it.count}`);
+        }
+      }
+
+      bot.emit('alteraBotEndObservation', lines.join('\n'));
+      return true;
+    } finally {
+      await closeContainer(bot, window);
+    }
+  } catch (err: any) {
+    bot.emit('alteraBotEndObservation', `Failed to open nearby chest: ${err.message || String(err)}`);
+    return false;
   }
 };
-
-

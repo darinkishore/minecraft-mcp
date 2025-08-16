@@ -1,9 +1,12 @@
 import type { Bot } from 'mineflayer';
 import { Vec3 } from 'vec3';
-import { goals as pathfinderGoals } from 'mineflayer-pathfinder';
+import pathfinderPkg from 'mineflayer-pathfinder';
 import { getWorldKey, getChestByPosition } from '../../storage/chestStore.js';
 
-const { GoalNear } = pathfinderGoals as any;
+// Extract GoalNear from the pathfinder package
+// Note: pathfinderPkg is the default export, goals is a property of it
+const { goals } = pathfinderPkg;
+const { GoalNear } = goals;
 
 export type ContainerType =
   | 'single_chest'
@@ -93,7 +96,11 @@ export function detectContainerAt(bot: Bot, pos: Vec3): DetectedContainer {
 }
 
 export async function navigateNear(bot: Bot, target: Vec3, range = 2, signal?: AbortSignal): Promise<void> {
-  if ((bot as any).pathfinder && GoalNear) {
+  const hasPathfinder = !!(bot as any).pathfinder;
+  const hasGoalNear = !!GoalNear;
+  const logger = (bot as any).logger;
+  
+  if (hasPathfinder && hasGoalNear) {
     const onAbort = () => {
       try {
         (bot as any).pathfinder.stop();
@@ -101,13 +108,35 @@ export async function navigateNear(bot: Bot, target: Vec3, range = 2, signal?: A
     };
     if (signal) signal.addEventListener('abort', onAbort);
     try {
-      await (bot as any).pathfinder.goto(new GoalNear(target.x, target.y, target.z, range));
+      const goal = new GoalNear(target.x, target.y, target.z, range);
+      if (logger?.debug) {
+        logger.debug(`Navigating to chest at ${target.x}, ${target.y}, ${target.z}`);
+      }
+      await (bot as any).pathfinder.goto(goal);
+    } catch (err: any) {
+      if (logger?.error) {
+        logger.error(`Navigation failed: ${err.message || err}`);
+      }
+      // Re-throw the error so we can see what's wrong
+      throw new Error(`Failed to navigate to chest: ${err.message || err}`);
     } finally {
       if (signal) signal.removeEventListener('abort', onAbort);
     }
   } else {
-    // No pathfinder, best effort: just look at it
-    await bot.lookAt(target.offset(0.5, 0.5, 0.5), true);
+    // Log what's missing
+    if (!hasPathfinder && logger?.error) {
+      logger.error('Pathfinder plugin not loaded on bot');
+    }
+    if (!hasGoalNear && logger?.error) {
+      logger.error('GoalNear not available from pathfinder module');
+    }
+    // Report what's missing
+    if (!hasPathfinder) {
+      throw new Error('Pathfinder plugin not loaded on bot');
+    }
+    if (!hasGoalNear) {
+      throw new Error('GoalNear not available from pathfinder module');
+    }
   }
 }
 
@@ -119,10 +148,19 @@ export async function openContainerAt(bot: Bot, pos: Vec3, signal?: AbortSignal)
     throw new Error('Access denied: This chest is forbidden.');
   }
 
-  const block = bot.blockAt(pos);
+  // For double chests, we need to ensure we're opening the correct position
+  // that will give us access to the full double chest inventory
+  let targetPos = pos;
+  const det = detectContainerAt(bot, pos);
+  if (det.type === 'double_chest') {
+    // For double chests, use the primary position to ensure consistent access
+    targetPos = det.primary;
+  }
+
+  const block = bot.blockAt(targetPos);
   if (!block) throw new Error('No block loaded at position');
-  await navigateNear(bot, pos, 2, signal);
-  await bot.lookAt(pos.offset(0.5, 0.5, 0.5), true);
+  await navigateNear(bot, targetPos, 2, signal);
+  await bot.lookAt(targetPos.offset(0.5, 0.5, 0.5), true);
   const window = await (bot as any).openContainer(block);
   return window;
 }
