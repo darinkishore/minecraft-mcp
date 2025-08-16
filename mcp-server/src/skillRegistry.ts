@@ -245,7 +245,6 @@ const SKILL_METADATA: Record<string, { description: string; params: Record<strin
                             type: "string",
                             description: "The command type: setblock, fill, clone, summon, give, or raw"
                         },
-                        // Common properties for various commands
                         x: { type: "number", description: "X coordinate (for setblock)" },
                         y: { type: "number", description: "Y coordinate (for setblock)" },
                         z: { type: "number", description: "Z coordinate (for setblock)" },
@@ -273,80 +272,160 @@ const SKILL_METADATA: Record<string, { description: string; params: Record<strin
                 description: "JavaScript code string for dynamic building. Available functions: setBlock(x,y,z,block), fill(x1,y1,z1,x2,y2,z2,block,mode?), clone(x1,y1,z1,x2,y2,z2,dx,dy,dz,mode?), summon(entity,x?,y?,z?), give(item,count?), execute(command), wait(ticks), log(message). Variables: bot, pos (bot position), Math, shouldStop()."
             }
         },
-        required: [] // Neither is required, but one must be provided (checked in skill)
+        required: []
     },
     buildPixelArt: {
         description: "Build pixel art from an image in Minecraft (requires cheats/operator permissions). Converts an image to pixel art using colored blocks. Maximum size is 256x256 blocks.",
         params: {
-            imagePath: {
-                type: "string",
-                description: "Path or URL to the image file to convert to pixel art"
-            },
-            width: {
-                type: "number",
-                description: "Width of the pixel art in blocks (max 256)"
-            },
-            height: {
-                type: "number",
-                description: "Height of the pixel art in blocks (max 256)"
-            },
-            x: {
-                type: "number",
-                description: "X coordinate for the bottom middle of the pixel art"
-            },
-            y: {
-                type: "number",
-                description: "Y coordinate for the bottom of the pixel art"
-            },
-            z: {
-                type: "number",
-                description: "Z coordinate for the bottom middle of the pixel art"
-            },
-            facing: {
-                type: "string",
-                description: "Direction the pixel art faces: 'north', 'south', 'east', or 'west' (default: 'north')"
-            }
+            imagePath: { type: "string", description: "Path or URL to the image file to convert to pixel art" },
+            width: { type: "number", description: "Width of the pixel art in blocks (max 256)" },
+            height: { type: "number", description: "Height of the pixel art in blocks (max 256)" },
+            x: { type: "number", description: "X coordinate for the bottom middle of the pixel art" },
+            y: { type: "number", description: "Y coordinate for the bottom of the pixel art" },
+            z: { type: "number", description: "Z coordinate for the bottom middle of the pixel art" },
+            facing: { type: "string", description: "Direction the pixel art faces: 'north', 'south', 'east', or 'west' (default: 'north')" }
         },
         required: ["imagePath", "width", "height", "x", "y", "z"]
     },
     readChat: {
         description: "Read recent chat messages from the server. Returns player messages, system messages, whispers, action bar messages, and titles.",
         params: {
-            count: {
-                type: "number",
-                description: "Number of recent messages to return (default: 20, max: 100)"
-            },
-            timeLimit: {
-                type: "number",
-                description: "Only return messages from the last N seconds (optional)"
-            },
-            filterType: {
-                type: "string",
-                description: "Filter by message type: 'all', 'chat', 'whisper', 'system', 'actionbar', 'title' (default: 'all')"
-            },
-            filterUsername: {
-                type: "string",
-                description: "Filter messages by specific username (optional)"
-            }
+            count: { type: "number", description: "Number of recent messages to return (default: 20, max: 100)" },
+            timeLimit: { type: "number", description: "Only return messages from the last N seconds (optional)" },
+            filterType: { type: "string", description: "Filter by message type: 'all', 'chat', 'whisper', 'system', 'actionbar', 'title' (default: 'all')" },
+            filterUsername: { type: "string", description: "Filter messages by specific username (optional)" }
         },
         required: []
     },
     sendChat: {
         description: "Send chat messages or commands to the server. Can send regular messages, commands (starting with /), or whispers.",
         params: {
-            message: {
-                type: "string",
-                description: "The message or command to send (max 256 characters)"
-            },
-            delay: {
-                type: "number",
-                description: "Optional delay in milliseconds before sending (default: 0, max: 5000)"
-            }
+            message: { type: "string", description: "The message or command to send (max 256 characters)" },
+            delay: { type: "number", description: "Optional delay in milliseconds before sending (default: 0, max: 5000)" }
         },
         required: ["message"]
     },
     captureScreenshot: {
         description: "Capture a 3D screenshot of what the bot currently sees. Returns a visual representation of the bot's current perspective.",
+        params: {},
+        required: []
+    },
+
+    // New chest management tools
+    label_chest: {
+        description: "Label a chest (single/double/barrel/ender/shulker) at coordinates with an optional note and hidden/forbidden flags",
+        params: {
+            x: { type: "number", description: "X coordinate" },
+            y: { type: "number", description: "Y coordinate" },
+            z: { type: "number", description: "Z coordinate" },
+            label: { type: "string", description: "Label for the chest" },
+            notes: { type: "string", description: "Optional notes/description" },
+            hidden: { type: "boolean", description: "If true, chest is hidden from list_chests" },
+            forbidden: { type: "boolean", description: "If true, chest is forbidden and invisible to the bot" }
+        },
+        required: ["x", "y", "z", "label"]
+    },
+    check_chest: {
+        description: "Inspect a chest by label or coordinates and list its contents",
+        params: {
+            label: { type: "string", description: "Label of the chest (optional if x/y/z provided)" },
+            x: { type: "number", description: "X coordinate (optional if label provided)" },
+            y: { type: "number", description: "Y coordinate (optional if label provided)" },
+            z: { type: "number", description: "Z coordinate (optional if label provided)" }
+        },
+        required: []
+    },
+    deposit_items: {
+        description: "Deposit specific items or all items into a labeled/coordinate chest",
+        params: {
+            chest: {
+                description: "Chest reference by label string or coordinates object",
+                oneOf: [
+                    { type: "string" },
+                    {
+                        type: "object",
+                        properties: {
+                            x: { type: "number" },
+                            y: { type: "number" },
+                            z: { type: "number" }
+                        },
+                        required: ["x", "y", "z"]
+                    }
+                ]
+            },
+            items: {
+                description: "Array of item names or the string 'all'",
+                anyOf: [
+                    { type: "array", items: { type: "string" } },
+                    { type: "string", enum: ["all"] }
+                ]
+            },
+            exclude: {
+                type: "array",
+                description: "Optional exclude list (not implemented yet)",
+                items: { type: "string" }
+            }
+        },
+        required: ["chest", "items"]
+    },
+    withdraw_items: {
+        description: "Withdraw specific items or all items from a labeled/coordinate chest",
+        params: {
+            chest: {
+                description: "Chest reference by label string or coordinates object",
+                oneOf: [
+                    { type: "string" },
+                    {
+                        type: "object",
+                        properties: {
+                            x: { type: "number" },
+                            y: { type: "number" },
+                            z: { type: "number" }
+                        },
+                        required: ["x", "y", "z"]
+                    }
+                ]
+            },
+            items: {
+                description: "Array of item names or the string 'all'",
+                anyOf: [
+                    { type: "array", items: { type: "string" } },
+                    { type: "string", enum: ["all"] }
+                ]
+            },
+            exclude: {
+                type: "array",
+                description: "Optional exclude list (not implemented yet)",
+                items: { type: "string" }
+            }
+        },
+        required: ["chest", "items"]
+    },
+    list_chests: {
+        description: "List all labeled chests, optionally including hidden ones",
+        params: {
+            include_hidden: { type: "boolean", description: "If true, include hidden chests in the listing" }
+        },
+        required: []
+    },
+    find_items: {
+        description: "Find the specified items across labeled chests and show counts per chest",
+        params: {
+            items: { type: "array", items: { type: "string" }, description: "Item names to search for" }
+        },
+        required: ["items"]
+    },
+    find_containers: {
+        description: "Find and list nearby containers (chests, barrels, ender chests, shulker boxes) with labels",
+        params: {
+            radius_x: { type: "number", description: "X radius (default 16)" },
+            radius_y: { type: "number", description: "Y radius (default 8)" },
+            radius_z: { type: "number", description: "Z radius (default 16)" }
+        },
+        required: []
+    },
+    get_inventory: {
+        description: "Summarize inventory usage and item counts",
         params: {},
         required: []
     }

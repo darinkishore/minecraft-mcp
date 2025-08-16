@@ -36,6 +36,11 @@ declare module 'mineflayer' {
         // Additional bot properties
         cheatsAllowed?: boolean;
         lastDanceTime?: number;
+
+        // MCP server metadata
+        serverHost?: string;
+        serverPort?: number;
+        viewerPort?: number | null;
     }
 
     interface Entity {

@@ -13,21 +13,9 @@ console.dir = (obj: any, options?: any) => {
     console.error('[DIR]', obj, options);
 };
 
-// Intercept direct writes to stdout to ensure only JSON-RPC messages go through
-const originalStdoutWrite = process.stdout.write.bind(process.stdout);
-(process.stdout as any).write = (chunk: any, encoding?: any, callback?: any) => {
-    // Check if this looks like a JSON-RPC message
-    const str = chunk.toString();
-    if (str.trim().startsWith('{') && str.includes('"jsonrpc"')) {
-        // This looks like a JSON-RPC message, let it through
-        return originalStdoutWrite(chunk, encoding, callback);
-    } else {
-        // Redirect non-JSON-RPC output to stderr
-        console.error('[STDOUT REDIRECT]', str.trim());
-        if (callback) callback();
-        return true;
-    }
-};
+// NOTE: Do NOT intercept process.stdout for MCP.
+// MCP's stdio transport uses framed messages (e.g., Content-Length headers).
+// Intercepting stdout risks corrupting the stream.
 
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
@@ -159,6 +147,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request: CallToolRequest)
 
             // Create a new bot
             const bot = mineflayerCreateBot(botOptions) as any; // Type assertion to allow adding custom properties
+            // Save server metadata for world scoping
+            bot.serverHost = serverHost;
+            bot.serverPort = serverPort;
 
             // Dynamically import and load plugins
             const [pathfinderModule, pvpModule, toolModule, collectBlockModule, viewerModule] = await Promise.all([
@@ -473,6 +464,9 @@ async function main() {
 
             // Create a new bot
             const bot = mineflayerCreateBot(botOptions) as any;
+            // Save server metadata for world scoping
+            bot.serverHost = serverHost;
+            bot.serverPort = serverPort;
 
             // Dynamically import and load plugins
             const [pathfinderModule, pvpModule, toolModule, collectBlockModule, viewerModule] = await Promise.all([
