@@ -41,3 +41,6 @@ yarn.lock
 *.tmp
 *.temp
 .cache/
+
+# Data files (user-specific)
+mcp-server/data/chests.json
